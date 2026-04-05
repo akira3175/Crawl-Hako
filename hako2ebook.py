@@ -28,6 +28,26 @@ LINE_SIZE = 80
 THREAD_NUM = 8
 DEFAULT_URLS = "https://docln.sbs"
 DEFAULT_SAVE_FOLDER = "raw"
+
+SETTINGS_FILE = "settings.json"
+
+def _load_settings():
+    global SLEEPTIME, DELAY_MIN, DELAY_MAX, LINE_SIZE, THREAD_NUM, DEFAULT_URLS, DEFAULT_SAVE_FOLDER
+    if isfile(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if "SLEEPTIME" in data: SLEEPTIME = int(data["SLEEPTIME"])
+                if "DELAY_MIN" in data: DELAY_MIN = float(data["DELAY_MIN"])
+                if "DELAY_MAX" in data: DELAY_MAX = float(data["DELAY_MAX"])
+                if "LINE_SIZE" in data: LINE_SIZE = int(data["LINE_SIZE"])
+                if "THREAD_NUM" in data: THREAD_NUM = int(data["THREAD_NUM"])
+                if "DEFAULT_URLS" in data: DEFAULT_URLS = data["DEFAULT_URLS"]
+                if "DEFAULT_SAVE_FOLDER" in data: DEFAULT_SAVE_FOLDER = data["DEFAULT_SAVE_FOLDER"]
+        except Exception:
+            pass
+
+_load_settings()
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.97 Safari/537.36',
     'Referer': 'https://ln.hako.vn/'
@@ -959,9 +979,23 @@ class HakoApp:
         if errors:
             self._append_log("⚠  Lỗi lưu cài đặt: " + " | ".join(errors), "warning")
         else:
+            try:
+                with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "SLEEPTIME": SLEEPTIME,
+                        "DELAY_MIN": DELAY_MIN,
+                        "DELAY_MAX": DELAY_MAX,
+                        "LINE_SIZE": LINE_SIZE,
+                        "THREAD_NUM": THREAD_NUM,
+                        "DEFAULT_URLS": DEFAULT_URLS,
+                        "DEFAULT_SAVE_FOLDER": DEFAULT_SAVE_FOLDER
+                    }, f, indent=4)
+            except Exception as e:
+                self._append_log(f"⚠  Lỗi trạng thái khi ghi tệp cài đặt: {e}", "warning")
+
             self._append_log(
-                f"✅  Đã lưu cài đặt: Sleep={SLEEPTIME}s · Lines={LINE_SIZE} · "
-                f"Threads={THREAD_NUM} · URL={DEFAULT_URLS} · Folder='{DEFAULT_SAVE_FOLDER}'",
+                f"✅  Đã lưu toàn thủ công: Sleep={SLEEPTIME}s · Delay={DELAY_MIN}-{DELAY_MAX}s · "
+                f"Threads={THREAD_NUM} · Folder='{DEFAULT_SAVE_FOLDER}'",
                 "success"
             )
 
@@ -969,6 +1003,8 @@ class HakoApp:
         """Khôi phục giá trị mặc định ban đầu vào entries."""
         defaults = {
             "SLEEPTIME":          "30",
+            "DELAY_MIN":          "2.0",
+            "DELAY_MAX":          "3.0",
             "LINE_SIZE":          "80",
             "THREAD_NUM":         "8",
             "DEFAULT_URLS":       "https://docln.sbs",
@@ -977,7 +1013,7 @@ class HakoApp:
         for k, v in defaults.items():
             if k in self._svar:
                 self._svar[k].set(v)
-        self._append_log("↺  Đã khôi phục cài đặt mặc định.", "info")
+        self._append_log("↺  Đã khôi phục thông số chuẩn. Hãy nhấn 'Lưu cài đặt' để áp dụng.", "info")
 
     # ── Start download (called from button) ────────────────────────────────
     def _start_download(self):
