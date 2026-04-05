@@ -35,68 +35,68 @@ tool_version = '2.0.5'
 bs4_html_parser = 'html.parser'
 import cloudscraper
 
-# ─── Pool User-Agent xoay vòng để tránh rate-limit ───────────────────────────
-# Mỗi thread được cấp một UA khác nhau khi lần đầu tạo session.
-_USER_AGENTS = [
-    # Chrome / Windows
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
-    # Chrome / macOS
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-    # Chrome / Linux
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    # Firefox / Windows
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0',
-    # Firefox / macOS
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14.2; rv:121.0) Gecko/20100101 Firefox/121.0',
-    # Safari / macOS
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_2_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
-    # Edge / Windows
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0',
-]
+# ─── Quản lý Cloudscraper để vượt qua Rate Limit (Cloudflare) ────────────────
+# Thay vì tự override User-Agent (điều này phá vỡ cơ chế của cloudscraper vì 
+# làm TLS fingerprint và UA không khớp), ta dùng browser context của cloudscraper.
+import random as _random
 
-_ua_cycle = itertools.cycle(_USER_AGENTS)
-_ua_lock  = threading.Lock()
-
-def _next_ua():
-    """Lấy User-Agent tiếp theo theo round-robin (thread-safe)."""
-    with _ua_lock:
-        return next(_ua_cycle)
-
-# Mỗi thread có session cloudscraper riêng + UA riêng → tải song song thực sự
+# Mỗi thread có session cloudscraper riêng → tải song song an toàn
 _tls = threading.local()
 
 def _get_scraper():
-    """Trả về cloudscraper session riêng cho thread hiện tại.
-    Lần đầu gọi trong mỗi thread sẽ tự động cấp một User-Agent mới từ pool.
-    """
+    """Trả về cloudscraper session với TLS fingerprint tự tạo cho thread này."""
     if not hasattr(_tls, 'scraper'):
-        _tls.ua = _next_ua()
-        _tls.scraper = cloudscraper.create_scraper()
-        _tls.scraper.headers.update({'User-Agent': _tls.ua})
+        # Cho phép cloudscraper tự chọn User-Agent và khớp TLS fingerprint
+        browsers = ['chrome', 'firefox', 'edge']
+        platforms = ['windows', 'linux', 'darwin']
+        _tls.scraper = cloudscraper.create_scraper(
+            browser={
+                'browser': _random.choice(browsers),
+                'platform': _random.choice(platforms),
+                'desktop': True
+            }
+        )
     return _tls.scraper
 
+def _rotate_scraper():
+    """Huỷ session hiện tại và xoay sang session/browser khác."""
+    try:
+        if hasattr(_tls, 'scraper'):
+            _tls.scraper.close()
+    except Exception:
+        pass
+    if hasattr(_tls, 'scraper'):
+        del _tls.scraper
 
 def check_available_request(url, steam=False, max_exception_retries=5):
-    session = _get_scraper()
-    # Gộp HEADERS cố định với UA xoay vòng của thread hiện tại
-    req_headers = {**HEADERS, 'User-Agent': getattr(_tls, 'ua', HEADERS['User-Agent'])}
     exception_count = 0
+    rate_limit_count = 0
     while True:
+        session = _get_scraper()
+        
+        # Chỉ truyền Referer, KHÔNG GHI ĐÈ User-Agent vì sẽ làm sai fingerprint
+        req_headers = {'Referer': HEADERS.get('Referer', 'https://ln.hako.vn/')}
+        
         try:
+            # Ngẫu nhiên delay 0.5 - 1.5s làm giảm áp lực truy cập cùng lúc từ nhiều luồng
+            time.sleep(_random.uniform(0.5, 1.5))
+            
             req = session.get(url, stream=steam, headers=req_headers, timeout=30)
             status_code = req.status_code
+            
             if any(substr in url for substr in ['ln.hako.vn', 'docln.net', 'docln.sbs']):
                 if status_code in range(200, 299) or status_code == 404:
                     return req
+                elif status_code == 429 or status_code == 403:
+                    rate_limit_count += 1
+                    # 403 có thể là Cloudflare block hoặc 429 là Too Many Requests
+                    jitter = _random.uniform(5, 10)  # Chờ lâu hơn để server hạ nhiệt
+                    print(f"Status {status_code}, đang bị rate-limit hoặc chặn. Chờ {jitter:.1f}s để rotate session... (lần {rate_limit_count})")
+                    _rotate_scraper()
+                    time.sleep(jitter)
+                    continue
                 else:
-                    ua_short = req_headers['User-Agent'].split('/')[-1][:20]
-                    print(f"Status {status_code} [UA: {ua_short}], retrying in {SLEEPTIME}s...")
+                    print(f"Status {status_code}, retrying in {SLEEPTIME}s...")
                     time.sleep(SLEEPTIME)
                     continue
             return req
@@ -105,6 +105,8 @@ def check_available_request(url, steam=False, max_exception_retries=5):
             if exception_count > max_exception_retries:
                 raise Exception(f"Kết nối thất bại. Lỗi mạng: {e}")
             print(f"Network error: {e}, retrying in 5s ({exception_count}/{max_exception_retries})...")
+            # Rotate scraper khi bị lỗi kết nối SSL/mạng để tránh sticky error
+            _rotate_scraper()
             time.sleep(5)
 
 
