@@ -22,6 +22,8 @@ from tkinter import messagebox
 import tkinter.font as tkfont
 
 SLEEPTIME = 30
+DELAY_MIN = 2.0
+DELAY_MAX = 3.0
 LINE_SIZE = 80
 THREAD_NUM = 8
 DEFAULT_URLS = "https://docln.sbs"
@@ -145,6 +147,8 @@ def _rotate_scraper():
     if hasattr(_tls, 'scraper'):
         del _tls.scraper
 
+_request_lock = threading.Lock()
+
 def check_available_request(url, steam=False, max_exception_retries=5):
     exception_count = 0
     rate_limit_count = 0
@@ -155,8 +159,10 @@ def check_available_request(url, steam=False, max_exception_retries=5):
         req_headers = {'Referer': HEADERS.get('Referer', 'https://ln.hako.vn/')}
         
         try:
-            # Ngẫu nhiên delay 0.5 - 1.5s làm giảm áp lực truy cập cùng lúc từ nhiều luồng
-            time.sleep(_random.uniform(0.5, 1.5))
+            # Cực kỳ quan trọng: Sử dụng Global Lock để dàn hàng Request.
+            # Ngăn chặn việc 8 Luồng (Threads) ngủ xong và thức dậy bắn Request cùng 1 tích tắc (Gây ra lỗi 429 Cloudflare)
+            with _request_lock:
+                time.sleep(_random.uniform(DELAY_MIN, DELAY_MAX))
             
             req = session.get(url, stream=steam, headers=req_headers, timeout=30)
             status_code = req.status_code
@@ -853,6 +859,8 @@ class HakoApp:
 
         fields = [
             ("SLEEPTIME",         "⏱  Sleep Time (giây)",          str(SLEEPTIME),        "Chờ N giây khi server báo lỗi (4xx/5xx). Không ảnh hưởng tốc độ tải bình thường."),
+            ("DELAY_MIN",         "⏳  Thời gian Delay tối thiểu", str(DELAY_MIN),        "Delay tối thiểu (giây) giữa các luồng tải để tránh Cloudflare block."),
+            ("DELAY_MAX",         "⏳  Thời gian Delay tối đa",    str(DELAY_MAX),        "Delay tối đa (giây). Kịch bản sẽ lấy ngẫu nhiên giữa Min và Max."),
             ("LINE_SIZE",         "📏  Line Size",                   str(LINE_SIZE),         "Độ rộng dòng văn bản tối đa"),
             ("THREAD_NUM",        "🧵  Số luồng tải chương",         str(THREAD_NUM),        "Số thread tải chương song song (khuyến nghị: 4–16)"),
             ("DEFAULT_URLS",      "🌐  URL gốc mặc định",            DEFAULT_URLS,           "Domain mặc định khi dùng ID thay vì link đầy đủ"),
@@ -923,12 +931,20 @@ class HakoApp:
 
     def _apply_settings(self):
         """Áp dụng giá trị từ settings panel vào các biến global."""
-        global SLEEPTIME, LINE_SIZE, THREAD_NUM, DEFAULT_URLS, DEFAULT_SAVE_FOLDER
+        global SLEEPTIME, LINE_SIZE, THREAD_NUM, DEFAULT_URLS, DEFAULT_SAVE_FOLDER, DELAY_MIN, DELAY_MAX
         errors = []
         try:
             SLEEPTIME = int(self._svar["SLEEPTIME"].get())
         except ValueError:
             errors.append("SLEEPTIME phải là số nguyên")
+        try:
+            DELAY_MIN = float(self._svar["DELAY_MIN"].get())
+        except ValueError:
+            errors.append("DELAY_MIN phải là số thực")
+        try:
+            DELAY_MAX = float(self._svar["DELAY_MAX"].get())
+        except ValueError:
+            errors.append("DELAY_MAX phải là số thực")
         try:
             LINE_SIZE = int(self._svar["LINE_SIZE"].get())
         except ValueError:
