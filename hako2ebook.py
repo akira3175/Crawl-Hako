@@ -1857,7 +1857,14 @@ class Engine:
         else:
             urls_to_try = [line]
 
-        error_msg = ""
+        # ── Pha 1: Chọn domain ────────────────────────────────────────────────
+        # Chỉ thử trang chính của truyện.
+        # Đổi domain khi: 404 | không có volume-list | lỗi kết nối mạng.
+        # KHÔNG đổi domain khi bị rate-limit (check_available_request tự chờ).
+        chosen_url  = None
+        chosen_soup = None
+        error_msg   = ""
+
         for url in urls_to_try:
             if not self.check_valid_url(url):
                 continue
@@ -1870,41 +1877,57 @@ class Engine:
                 if r.status_code == 404:
                     print(f"Không tìm thấy trang (404): {url}")
                     continue
-
                 soup = BeautifulSoup(r.text, bs4_html_parser)
                 if not soup.find('section', 'volume-list'):
                     print(f"Không tìm thấy danh sách tập: {url}")
                     continue
-
-                print(f"Đã kết nối thành công: {url}")
-                ln_info = LNInfo()
-                ln_info.get_info_from_soup(url, soup)
-
-                if app:
-                    app.update_novel_status(line, "📥", ln_info.name,
-                                            f"Đang tải {ln_info.num_vol} tập…",
-                                            ACCENT3, FG_INFO, progress=15)
-
-                epub_engine = EpubEngine()
-                epub_engine._app_ref = app
-                epub_engine._novel_line = line
-                epub_engine.create_epub(ln_info, ["Tất cả"])
-                print(f"Hoàn thành tải truyện: {ln_info.name}")
-
-                if app:
-                    app.update_novel_status(line, "✅", ln_info.name,
-                                            "✓ Xong!",
-                                            FG_SUCCESS, FG_SUCCESS, progress=100)
-                return (True, line, ln_info.name)
-
+                # Domain hợp lệ
+                chosen_url  = url
+                chosen_soup = soup
+                break
             except Exception as e:
                 error_msg = str(e)
-                print(f"Lỗi khi xử lý {url}: {e}")
+                print(f"Lỗi kết nối ban đầu {url}: {e} — thử domain khác…")
 
-        if app:
-            app.update_novel_status(line, "❌", None, "Thất bại",
-                                    FG_ERROR, FG_ERROR, progress=100)
-        return (False, line, f"Lỗi: {error_msg}")
+        if chosen_url is None:
+            if app:
+                app.update_novel_status(line, "❌", None, "Không kết nối được",
+                                        FG_ERROR, FG_ERROR, progress=100)
+            return (False, line, f"Không tìm thấy domain nào hoạt động. {error_msg}")
+
+        # ── Pha 2: Tải toàn bộ từ domain đã chọn ────────────────────────────────────
+        # Sau khi có domain, KHÔNG đổi domain nữa dù gặp lỗi.
+        # Rate-limit → check_available_request tự chờ & retry trên cùng URL.
+        try:
+            print(f"Đã kết nối thành công: {chosen_url}")
+            ln_info = LNInfo()
+            ln_info.get_info_from_soup(chosen_url, chosen_soup)
+
+            if app:
+                app.update_novel_status(line, "📥", ln_info.name,
+                                        f"Đang tải {ln_info.num_vol} tập…",
+                                        ACCENT3, FG_INFO, progress=15)
+
+            epub_engine = EpubEngine()
+            epub_engine._app_ref    = app
+            epub_engine._novel_line = line
+            epub_engine.create_epub(ln_info, ["Tất cả"])
+            print(f"Hoàn thành tải truyện: {ln_info.name}")
+
+            if app:
+                app.update_novel_status(line, "✅", ln_info.name,
+                                        "✓ Xong!",
+                                        FG_SUCCESS, FG_SUCCESS, progress=100)
+            return (True, line, ln_info.name)
+
+        except Exception as e:
+            # Lỗi trong quá trình tải — KHÔNG thử domain khác
+            error_msg = str(e)
+            print(f"Lỗi khi tải truyện từ {chosen_url}: {e}")
+            if app:
+                app.update_novel_status(line, "❌", None, "Lỗi khi tải",
+                                        FG_ERROR, FG_ERROR, progress=100)
+            return (False, line, f"Lỗi tải: {error_msg}")
 
     def start(self):
         UIManager.boot(self)
