@@ -36,26 +36,84 @@ bs4_html_parser = 'html.parser'
 import cloudscraper
 
 # ─── Quản lý Cloudscraper để vượt qua Rate Limit (Cloudflare) ────────────────
-# Thay vì tự override User-Agent (điều này phá vỡ cơ chế của cloudscraper vì 
-# làm TLS fingerprint và UA không khớp), ta dùng browser context của cloudscraper.
 import random as _random
+
+# Mở rộng số lượng User-Agent và User Profile một cách đa dạng (Windows, Mac, Linux, iOS, Android)
+USER_AGENTS = [
+    # --- Desktop: Windows ---
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 OPR/107.0.0.0",
+    
+    # --- Desktop: macOS ---
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Safari/605.1.15",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:123.0) Gecko/20100101 Firefox/123.0",
+    
+    # --- Desktop: Linux ---
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:123.0) Gecko/20100101 Firefox/123.0",
+    
+    # --- Mobile: Android ---
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 12; Redmi Note 11) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Android 14; Mobile; rv:123.0) Gecko/123.0 Firefox/123.0",
+    
+    # --- Mobile: iOS (iPhone / iPad) ---
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_7_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPad; CPU OS 17_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Mobile/15E148 Safari/604.1",
+]
+
+# Các cấu hình an toàn của cloudscraper (tự match TLS theo base platform)
+CLOUD_PROFILES = [
+    {'browser': 'chrome',  'platform': 'windows', 'desktop': True},
+    {'browser': 'firefox', 'platform': 'windows', 'desktop': True},
+    {'browser': 'edge',    'platform': 'windows', 'desktop': True},
+    {'browser': 'chrome',  'platform': 'darwin',  'desktop': True},
+    {'browser': 'safari',  'platform': 'darwin',  'desktop': True},
+    {'browser': 'chrome',  'platform': 'linux',   'desktop': True},
+    {'browser': 'firefox', 'platform': 'linux',   'desktop': True},
+    {'browser': 'chrome',  'platform': 'android', 'desktop': False},
+    {'browser': 'safari',  'platform': 'ios',     'desktop': False},
+]
+
+# ─── Mở rộng xoay tua Proxy (IP rotation) ────────────────────────────────────
+PROXY_LIST = []
+if isfile("proxies.txt"):
+    try:
+        with open("proxies.txt", "r", encoding="utf-8") as _pf:
+            PROXY_LIST = [p.strip() for p in _pf if p.strip() and not p.startswith("#")]
+    except Exception:
+        pass
 
 # Mỗi thread có session cloudscraper riêng → tải song song an toàn
 _tls = threading.local()
 
 def _get_scraper():
-    """Trả về cloudscraper session với TLS fingerprint tự tạo cho thread này."""
+    """Trả về cloudscraper session giả lập nhiều loại user profile đa dạng."""
     if not hasattr(_tls, 'scraper'):
-        # Cho phép cloudscraper tự chọn User-Agent và khớp TLS fingerprint
-        browsers = ['chrome', 'firefox', 'edge']
-        platforms = ['windows', 'linux', 'darwin']
-        _tls.scraper = cloudscraper.create_scraper(
-            browser={
-                'browser': _random.choice(browsers),
-                'platform': _random.choice(platforms),
-                'desktop': True
-            }
-        )
+        # Kết hợp ngẫu nhiên: Dùng Custom User-Agent (đa dạng pool) hoặc Auto match TLS từ Cloudscraper options
+        if _random.random() < 0.5:
+            b_config = {'custom': _random.choice(USER_AGENTS)}
+        else:
+            b_config = _random.choice(CLOUD_PROFILES)
+            
+        _tls.scraper = cloudscraper.create_scraper(browser=b_config)
+        
+        # Nếu có danh sách proxy, chọn ngẫu nhiên một proxy và gán vào session hiện tại
+        if PROXY_LIST:
+            proxy = _random.choice(PROXY_LIST)
+            if "://" not in proxy:
+                proxy = f"http://{proxy}"
+            _tls.scraper.proxies = {"http": proxy, "https": proxy}
+            
     return _tls.scraper
 
 def _rotate_scraper():
