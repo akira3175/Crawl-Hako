@@ -1345,7 +1345,13 @@ class HakoApp:
                     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
                     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
                     os.path.join(LOCALAPP, "Google", "Chrome", "Application", "chrome.exe"),
-                    r"C:\Program Files\Google\Chrome Beta\Application\chrome.exe",
+                    # Microsoft Edge (Chromium)
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+                    # Brave Browser
+                    r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+                    # Cốc Cốc
+                    os.path.join(LOCALAPP, "CocCoc", "Browser", "Application", "browser.exe"),
                 ]
                 
                 chrome_exe = next((p for p in CHROME_PATHS if os.path.isfile(p)), None)
