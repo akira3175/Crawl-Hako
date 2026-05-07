@@ -134,19 +134,124 @@ if isfile("proxies.txt"):
     except Exception:
         pass
 
+# ─── Cookie đăng nhập (để crawl truyện bị ẩn / chỉ quản lý xem được) ────────
+# Đặt file cookies.json (format Netscape/EditThisCookie) hoặc cookies.txt
+# bên cạnh hako2ebook.py để tự động load.
+SESSION_COOKIES: dict = {}
+
+def _load_cookies():
+    """Đọc cookie từ cookies.json hoặc cookies.txt và lưu vào SESSION_COOKIES."""
+    global SESSION_COOKIES
+    # Ưu tiên cookies.json (export từ EditThisCookie / Cookie-Editor)
+    if isfile("cookies.json"):
+        try:
+            with open("cookies.json", "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            # Hỗ trợ 2 format: [{"name":..., "value":...}] hoặc {"name": "value"}
+            if isinstance(raw, list):
+                SESSION_COOKIES = {c["name"]: c["value"] for c in raw if "name" in c and "value" in c}
+            elif isinstance(raw, dict):
+                SESSION_COOKIES = raw
+            if SESSION_COOKIES:
+                print(f"[Cookie] Đã load {len(SESSION_COOKIES)} cookie từ cookies.json")
+            return
+        except Exception as e:
+            print(f"[Cookie] Lỗi đọc cookies.json: {e}")
+    # Fallback: cookies.txt (format: domain\tFLAG\tpath\tSECURE\texpiry\tname\tvalue)
+    if isfile("cookies.txt"):
+        try:
+            with open("cookies.txt", "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split("\t")
+                    if len(parts) >= 7:
+                        SESSION_COOKIES[parts[5]] = parts[6]
+            if SESSION_COOKIES:
+                print(f"[Cookie] Đã load {len(SESSION_COOKIES)} cookie từ cookies.txt")
+        except Exception as e:
+            print(f"[Cookie] Lỗi đọc cookies.txt: {e}")
+
+_load_cookies()
+
+COOKIES_FILE = "cookies.json"
+
+HAKO_DOMAINS = ['.hako.vn', '.docln.net', '.docln.sbs']
+
+def grab_cookies_from_browser(port: int = 9223) -> tuple[bool, str]:
+    """
+    Kết nối qua Chrome DevTools Protocol để lấy cookie từ trình duyệt đã được mở.
+    Trả về (True, "Chrome") hoặc (False, thông_báo_lỗi).
+    """
+    global SESSION_COOKIES
+    import urllib.request, json as _json
+
+    try:
+        import websocket
+    except ImportError:
+        return False, "Thiếu thư viện websocket-client. Vui lòng cài đặt (pip install websocket-client)."
+
+    BASE = f"http://127.0.0.1:{port}"
+    try:
+        with urllib.request.urlopen(f"{BASE}/json/version", timeout=2) as r:
+            info = _json.loads(r.read())
+        browser_ws = info.get("webSocketDebuggerUrl", "")
+    except Exception as e:
+        return False, f"Không thể kết nối với trình duyệt đang mở (lỗi: {e}). Hãy thử lại nút 'Mở trang đăng nhập'."
+
+    if not browser_ws:
+        return False, "Trình duyệt không hỗ trợ CDP (thiếu webSocketDebuggerUrl)."
+
+    try:
+        ws = websocket.WebSocket()
+        ws.connect(browser_ws, origin=f"http://127.0.0.1:{port}")
+        ws.send(_json.dumps({"id": 1, "method": "Storage.getCookies"}))
+        resp = _json.loads(ws.recv())
+        ws.close()
+    except Exception as e:
+        return False, f"Lỗi trong quá trình lấy cookie qua WebSocket: {e}"
+
+    cookies = resp.get("result", {}).get("cookies", [])
+    found_cookies = {}
+    
+    for c in cookies:
+        domain = c.get("domain", "")
+        if "hako" in domain or "docln" in domain:
+            if c.get("name") == "ln_session":
+                found_cookies["ln_session"] = c.get("value")
+                break
+
+    if not found_cookies:
+        return False, "Không tìm thấy cookie ln_session. Bạn đã đăng nhập thành công chưa?"
+
+    SESSION_COOKIES = found_cookies
+    try:
+        import json
+        with open(COOKIES_FILE, 'w', encoding='utf-8') as f:
+            json.dump(found_cookies, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+    try:
+        if hasattr(_tls, 'scraper'):
+            _tls.scraper.cookies.update(SESSION_COOKIES)
+    except Exception:
+        pass
+
+    return True, "Chrome (tự động)"
+
+
+
 # Mỗi thread có session cloudscraper riêng → tải song song an toàn
 _tls = threading.local()
 
 def _get_scraper():
-    """Trả về cloudscraper session giả lập nhiều loại user profile đa dạng."""
+    """Trả về cloudscraper session giả lập Chrome Windows để khớp TLS fingerprint."""
     if not hasattr(_tls, 'scraper'):
-        # Kết hợp ngẫu nhiên: Dùng Custom User-Agent (đa dạng pool) hoặc Auto match TLS từ Cloudscraper options
-        if _random.random() < 0.5:
-            b_config = {'custom': _random.choice(USER_AGENTS)}
-        else:
-            b_config = _random.choice(CLOUD_PROFILES)
-            
-        _tls.scraper = cloudscraper.create_scraper(browser=b_config)
+        # CHÚ Ý: Không dùng custom User-Agent ngẫu nhiên vì sẽ gây lỗi lệch TLS Fingerprint với Cloudflare.
+        # Luôn để cloudscraper tự chọn User-Agent khớp với nền tảng nó hỗ trợ.
+        b_config = {'browser': 'chrome', 'platform': 'windows', 'desktop': True}
+        _tls.scraper = cloudscraper.create_scraper(browser=b_config, delay=10)
         
         # Nếu có danh sách proxy, chọn ngẫu nhiên một proxy và gán vào session hiện tại
         if PROXY_LIST:
@@ -154,6 +259,10 @@ def _get_scraper():
             if "://" not in proxy:
                 proxy = f"http://{proxy}"
             _tls.scraper.proxies = {"http": proxy, "https": proxy}
+        
+        # Inject cookie đăng nhập nếu có
+        if SESSION_COOKIES:
+            _tls.scraper.cookies.update(SESSION_COOKIES)
             
     return _tls.scraper
 
@@ -175,9 +284,12 @@ def check_available_request(url, steam=False, max_exception_retries=5):
     while True:
         session = _get_scraper()
         
-        # Chỉ truyền Referer, KHÔNG GHI ĐÈ User-Agent vì sẽ làm sai fingerprint
         req_headers = {'Referer': HEADERS.get('Referer', 'https://ln.hako.vn/')}
-        
+
+        # Luôn sync cookie vào session trước mỗi request (phòng trường hợp cookie được load sau)
+        if SESSION_COOKIES:
+            session.cookies.update(SESSION_COOKIES)
+
         try:
             # Cực kỳ quan trọng: Sử dụng Global Lock để dàn hàng Request.
             # Ngăn chặn việc 8 Luồng (Threads) ngủ xong và thức dậy bắn Request cùng 1 tích tắc (Gây ra lỗi 429 Cloudflare)
@@ -188,13 +300,27 @@ def check_available_request(url, steam=False, max_exception_retries=5):
             status_code = req.status_code
             
             if any(substr in url for substr in ['ln.hako.vn', 'docln.net', 'docln.sbs']):
-                if status_code in range(200, 299) or status_code == 404:
+                # Hako có thể trả về 503 nhưng nội dung thực chất là trang 404 (truyện bị ẩn)
+                is_fake_503_404 = (status_code in [403, 503]) and ('error-name">404<' in req.text or 'error-name">403<' in req.text)
+
+                if status_code in range(200, 299) or status_code == 404 or is_fake_503_404:
                     return req
-                elif status_code == 429 or status_code == 403:
+                elif status_code in [403, 429, 503]:
                     rate_limit_count += 1
-                    # 403 có thể là Cloudflare block hoặc 429 là Too Many Requests
+                    
+                    # Dump HTML ra file để debug
+                    try:
+                        with open(f"error_{status_code}_debug.html", "w", encoding="utf-8") as f:
+                            f.write(req.text)
+                    except Exception:
+                        pass
+                        
+                    if rate_limit_count > 5:
+                        print(f"Status {status_code}, đã thử đổi session 5 lần nhưng vẫn bị chặn. Bỏ qua link này.")
+                        return req
+                        
                     jitter = _random.uniform(5, 10)  # Chờ lâu hơn để server hạ nhiệt
-                    print(f"Status {status_code}, đang bị rate-limit hoặc chặn. Chờ {jitter:.1f}s để rotate session... (lần {rate_limit_count})")
+                    print(f"Status {status_code}, đang bị chặn (Cloudflare/Rate-limit). Chờ {jitter:.1f}s để đổi session... (lần {rate_limit_count})")
                     _rotate_scraper()
                     time.sleep(jitter)
                     continue
@@ -917,7 +1043,7 @@ class HakoApp:
 
         # ── Buttons row ──
         btn_row = tk.Frame(panel, bg=BG_CARD, padx=16)
-        btn_row.pack(fill=tk.X, pady=(0, 10))
+        btn_row.pack(fill=tk.X, pady=(0, 6))
 
         save_btn = self._make_button(
             btn_row, "💾  Lưu cài đặt", self._apply_settings,
@@ -928,6 +1054,50 @@ class HakoApp:
             btn_row, "↺  Mặc định", self._reset_settings,
             "#252540", "#353560", font=("Segoe UI", 9), padx=12, pady=5)
         reset_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+        # ── Dòng phân cách ──
+        tk.Frame(panel, bg="#1e1e40", height=1).pack(fill=tk.X, padx=16, pady=(4, 0))
+
+        # ── Khu vực đăng nhập Hako ──
+        login_area = tk.Frame(panel, bg=BG_CARD, padx=16)
+        login_area.pack(fill=tk.X, pady=(6, 10))
+
+        # Label tiêu đề
+        login_hdr = tk.Frame(login_area, bg=BG_CARD)
+        login_hdr.pack(fill=tk.X, pady=(0, 6))
+        tk.Frame(login_hdr, bg="#f39c12", width=3).pack(side=tk.LEFT, fill=tk.Y, padx=(0, 7))
+        tk.Label(login_hdr, text="TÀI KHOẢN HAKO",
+                 font=("Segoe UI", 8, "bold"), fg="#f39c12", bg=BG_CARD
+                 ).pack(side=tk.LEFT)
+        tk.Label(login_hdr,
+                 text="  Dùng để tải truyện bị ẩn mà bạn là quản lý",
+                 font=("Segoe UI", 8), fg=FG_SECONDARY, bg=BG_CARD
+                 ).pack(side=tk.LEFT)
+
+        # Row: trạng thái + nút
+        login_row = tk.Frame(login_area, bg=BG_CARD)
+        login_row.pack(fill=tk.X)
+
+        # Badge trạng thái đăng nhập
+        init_logged = bool(SESSION_COOKIES.get('ln_session'))
+        self._login_status_text = tk.StringVar(
+            value=("●  Đã đăng nhập" if init_logged else "○  Chưa đăng nhập"))
+        self._login_status_color = FG_SUCCESS if init_logged else FG_SECONDARY
+        self._login_status_lbl = tk.Label(
+            login_row, textvariable=self._login_status_text,
+            font=("Segoe UI", 9, "bold"),
+            fg=self._login_status_color, bg=BG_CARD)
+        self._login_status_lbl.pack(side=tk.LEFT, padx=(0, 14))
+
+        login_btn = self._make_button(
+            login_row, "🔑  Đăng nhập", self._open_login_dialog,
+            "#1a4a1a", "#256625", font=("Segoe UI", 9, "bold"), padx=14, pady=5)
+        login_btn.pack(side=tk.LEFT)
+
+        logout_btn = self._make_button(
+            login_row, "🚪  Đăng xuất", self._do_logout,
+            "#2a1a1a", "#4a2020", font=("Segoe UI", 9), padx=12, pady=5)
+        logout_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         return panel
 
@@ -1014,6 +1184,328 @@ class HakoApp:
             if k in self._svar:
                 self._svar[k].set(v)
         self._append_log("↺  Đã khôi phục thông số chuẩn. Hãy nhấn 'Lưu cài đặt' để áp dụng.", "info")
+
+    # ── Login dialog ────────────────────────────────────────────────────────
+    def _open_login_dialog(self):
+        """Mở cửa sổ đăng nhập Hako — hỗ trợ tự động và thủ công."""
+        import webbrowser
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Đăng nhập Hako")
+        dlg.configure(bg=BG_DARK)
+        dlg.resizable(False, True)
+        dlg.grab_set()
+
+        w, h = 500, 380
+        sw, sh = dlg.winfo_screenwidth(), dlg.winfo_screenheight()
+        dlg.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+
+        # ── Header ──
+        hdr = tk.Frame(dlg, bg=ACCENT2)
+        hdr.pack(fill=tk.X)
+        tk.Label(hdr, text="🔑  Đăng nhập tài khoản Hako",
+                 font=("Segoe UI", 11, "bold"), fg=FG_PRIMARY, bg=ACCENT2,
+                 padx=16, pady=10).pack(side=tk.LEFT)
+
+        # ── Tab bar ──
+        tab_bar = tk.Frame(dlg, bg="#0a0a18")
+        tab_bar.pack(fill=tk.X)
+
+        tab_auto_lbl   = tk.Label(tab_bar, text="⚡  Tự động",   font=("Segoe UI", 9, "bold"),
+                                  fg=FG_PRIMARY, bg=ACCENT2, padx=18, pady=6, cursor="hand2")
+        tab_manual_lbl = tk.Label(tab_bar, text="✏  Nhập tay",  font=("Segoe UI", 9),
+                                  fg=FG_SECONDARY, bg="#0a0a18", padx=18, pady=6, cursor="hand2")
+        tab_auto_lbl.pack(side=tk.LEFT)
+        tab_manual_lbl.pack(side=tk.LEFT)
+
+        # ── Shared status bar ──
+        msg_var = tk.StringVar()
+        msg_lbl = tk.Label(dlg, textvariable=msg_var,
+                           font=("Segoe UI", 8, "bold"), fg=FG_ERROR, bg=BG_DARK,
+                           anchor=tk.W, wraplength=460, padx=20)
+        msg_lbl.pack(fill=tk.X, side=tk.BOTTOM, pady=(0, 4))
+
+        btn_bar = tk.Frame(dlg, bg=BG_DARK, padx=20, pady=8)
+        btn_bar.pack(fill=tk.X, side=tk.BOTTOM)
+
+        body = tk.Frame(dlg, bg=BG_DARK)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        # ─────────────────────────────────────────
+        # Pane TỰ ĐỘNG
+        # ─────────────────────────────────────────
+        pane_auto = tk.Frame(body, bg=BG_DARK, padx=24, pady=14)
+
+        steps = [
+            ("1", "Nhấn  \"🌐 Mở trang đăng nhập\"  — trang Hako mở trong trình duyệt"),
+            ("2", "Đăng nhập bình thường (Chrome / Edge / Firefox) — KHÔNG cần đóng trình duyệt"),
+            ("3", "Quay lại đây và nhấn  \"✔ Đã đăng nhập xong\""),
+        ]
+        for num, txt in steps:
+            row = tk.Frame(pane_auto, bg=BG_DARK)
+            row.pack(fill=tk.X, pady=4)
+            tk.Label(row, text=num, font=("Segoe UI", 9, "bold"),
+                     fg=BG_DARK, bg=ACCENT3, width=2, padx=4, pady=2).pack(side=tk.LEFT)
+            tk.Label(row, text=f"  {txt}", font=("Segoe UI", 9),
+                     fg=FG_PRIMARY, bg=BG_DARK, anchor=tk.W,
+                     wraplength=420).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        note = tk.Label(pane_auto,
+                        text="⚠  Nếu không lấy được cookie tự động, hãy dùng tab  ✏ Nhập tay",
+                        font=("Segoe UI", 8), fg=FG_WARNING, bg=BG_DARK, anchor=tk.W)
+        note.pack(fill=tk.X, pady=(10, 0))
+
+        # ─────────────────────────────────────────
+        # Pane NHẬP TAY
+        # ─────────────────────────────────────────
+        pane_manual = tk.Frame(body, bg=BG_DARK, padx=24, pady=14)
+
+        guide_steps = [
+            ("1", "Mở ln.hako.vn, đăng nhập, nhấn F12 → tab Application"),
+            ("2", "Chọn Storage → Cookies → https://ln.hako.vn"),
+            ("3", "Tìm dòng  ln_session  → copy toàn bộ cột Value"),
+            ("4", "Paste vào ô bên dưới rồi nhấn  \"💾 Lưu cookie\""),
+        ]
+        for num, txt in guide_steps:
+            row = tk.Frame(pane_manual, bg=BG_DARK)
+            row.pack(fill=tk.X, pady=3)
+            tk.Label(row, text=num, font=("Segoe UI", 9, "bold"),
+                     fg=BG_DARK, bg="#f39c12", width=2, padx=4, pady=2).pack(side=tk.LEFT)
+            tk.Label(row, text=f"  {txt}", font=("Segoe UI", 9),
+                     fg=FG_PRIMARY, bg=BG_DARK, anchor=tk.W,
+                     wraplength=420).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        tk.Label(pane_manual, text="Giá trị ln_session:",
+                 font=("Segoe UI", 9, "bold"), fg=FG_PRIMARY, bg=BG_DARK,
+                 anchor=tk.W).pack(fill=tk.X, pady=(10, 2))
+
+        inp_frame = tk.Frame(pane_manual, bg=ACCENT2, padx=1, pady=1)
+        inp_frame.pack(fill=tk.X)
+        cookie_var = tk.StringVar()
+        cookie_ent = tk.Entry(inp_frame, textvariable=cookie_var,
+                              font=("Consolas", 9), bg=BG_INPUT, fg=FG_PRIMARY,
+                              insertbackground=ACCENT3, relief=tk.FLAT)
+        cookie_ent.pack(fill=tk.X, padx=4, pady=5)
+
+        # ─────────────────────────────────────────
+        # Tab switching logic
+        # ─────────────────────────────────────────
+        current_pane = [pane_auto]
+
+        def _show_auto():
+            current_pane[0].pack_forget()
+            pane_auto.pack(fill=tk.BOTH, expand=True)
+            current_pane[0] = pane_auto
+            tab_auto_lbl.configure(bg=ACCENT2, fg=FG_PRIMARY, font=("Segoe UI", 9, "bold"))
+            tab_manual_lbl.configure(bg="#0a0a18", fg=FG_SECONDARY, font=("Segoe UI", 9))
+            # Swap buttons
+            for w in btn_bar.winfo_children(): w.destroy()
+            _build_auto_buttons()
+
+        def _show_manual():
+            current_pane[0].pack_forget()
+            pane_manual.pack(fill=tk.BOTH, expand=True)
+            current_pane[0] = pane_manual
+            tab_manual_lbl.configure(bg=ACCENT2, fg=FG_PRIMARY, font=("Segoe UI", 9, "bold"))
+            tab_auto_lbl.configure(bg="#0a0a18", fg=FG_SECONDARY, font=("Segoe UI", 9))
+            for w in btn_bar.winfo_children(): w.destroy()
+            _build_manual_buttons()
+            cookie_ent.focus_set()
+
+        tab_auto_lbl.bind("<Button-1>",   lambda e: _show_auto())
+        tab_manual_lbl.bind("<Button-1>", lambda e: _show_manual())
+
+        # ─────────────────────────────────────────
+        # Hàm dùng chung: cập nhật badge sau khi lấy cookie thành công
+        # ─────────────────────────────────────────
+        def _on_success(source_name):
+            if hasattr(self, '_login_status_text'):
+                self._login_status_text.set("●  Đã đăng nhập")
+                self._login_status_lbl.configure(fg=FG_SUCCESS)
+            self._append_log(f"🔑  Đã lấy cookie từ {source_name}.", "success")
+            dlg.after(1400, dlg.destroy)
+
+        # ─────────────────────────────────────────
+        # Buttons TAB AUTO
+        # ─────────────────────────────────────────
+        def _build_auto_buttons():
+            # Lưu reference proc để terminate
+            dlg._chrome_proc = None
+            dlg._chrome_tmp_dir = None
+
+            def _open_browser():
+                import subprocess, tempfile, os
+                
+                msg_var.set("⏳  Đang tìm trình duyệt Chrome...")
+                msg_lbl.configure(fg=FG_INFO)
+                dlg.update()
+
+                LOCALAPP = os.environ.get("LOCALAPPDATA", "")
+                CHROME_PATHS = [
+                    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                    os.path.join(LOCALAPP, "Google", "Chrome", "Application", "chrome.exe"),
+                    r"C:\Program Files\Google\Chrome Beta\Application\chrome.exe",
+                ]
+                
+                chrome_exe = next((p for p in CHROME_PATHS if os.path.isfile(p)), None)
+                if not chrome_exe:
+                    msg_var.set("❌  Không tìm thấy trình duyệt Chrome trên máy. Hãy dùng tab Nhập tay.")
+                    msg_lbl.configure(fg=FG_ERROR)
+                    return
+                
+                # Tạo thư mục profile rỗng để mở Chrome "sạch", không bị dính profile cũ
+                dlg._chrome_tmp_dir = tempfile.mkdtemp(prefix="hako_chrome_")
+                
+                try:
+                    dlg._chrome_proc = subprocess.Popen([
+                        chrome_exe,
+                        "--remote-debugging-port=9223",
+                        "--remote-allow-origins=http://127.0.0.1:9223",
+                        f"--user-data-dir={dlg._chrome_tmp_dir}",
+                        "--no-first-run",
+                        "--no-default-browser-check",
+                        "https://ln.hako.vn/login"
+                    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    
+                    msg_var.set("⏳  Đã mở Chrome mới. Hãy đăng nhập rồi nhấn 'Đã đăng nhập xong'.")
+                    msg_lbl.configure(fg=FG_INFO)
+                except Exception as e:
+                    msg_var.set(f"❌  Lỗi khi mở Chrome: {e}")
+                    msg_lbl.configure(fg=FG_ERROR)
+
+            def _grab_auto():
+                msg_var.set("⏳  Đang đọc cookie từ trình duyệt...")
+                msg_lbl.configure(fg=FG_INFO)
+                ok_btn = confirm_ref[0].winfo_children()[0]
+                ok_btn.configure(text="⏳  Đang xử lý...", cursor="arrow")
+                dlg.update()
+                
+                def _worker():
+                    ok, result = grab_cookies_from_browser(port=9223)
+                    
+                    def _update():
+                        try:
+                            if not dlg.winfo_exists():
+                                return
+                            if ok:
+                                msg_var.set(f"✅  Thành công! Đã lấy cookie.")
+                                msg_lbl.configure(fg=FG_SUCCESS)
+                                _on_success("Chrome (tự động)")
+                                # Đóng Chrome
+                                if hasattr(dlg, '_chrome_proc') and dlg._chrome_proc:
+                                    try:
+                                        dlg._chrome_proc.terminate()
+                                    except:
+                                        pass
+                            else:
+                                msg_var.set(f"❌  {result}")
+                                msg_lbl.configure(fg=FG_ERROR)
+                                try:
+                                    ok_btn.configure(text="✔  Đã đăng nhập xong", cursor="hand2")
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                    dlg.after(0, _update)
+                    
+                import threading as _t
+                _t.Thread(target=_worker, daemon=True).start()
+
+            confirm_ref = [None]
+            self._make_button(btn_bar, "🌐  Mở Chrome tự động", _open_browser,
+                              "#0f3460", "#1a4a80",
+                              font=("Segoe UI", 9, "bold"), padx=14, pady=7).pack(side=tk.LEFT)
+            confirm_ref[0] = self._make_button(btn_bar, "✔  Đã đăng nhập xong", _grab_auto,
+                              "#1a5c1a", "#237a23",
+                              font=("Segoe UI", 9, "bold"), padx=14, pady=7)
+            confirm_ref[0].pack(side=tk.LEFT, padx=(8, 0))
+            self._make_button(btn_bar, "Hủy", dlg.destroy,
+                              "#252540", "#353560",
+                              font=("Segoe UI", 9), padx=12, pady=7).pack(side=tk.LEFT, padx=(8, 0))
+
+        # ─────────────────────────────────────────
+        # Buttons TAB NHẬP TAY
+        # ─────────────────────────────────────────
+        def _build_manual_buttons():
+            def _save_manual():
+                val = cookie_var.get().strip()
+                if not val:
+                    msg_var.set("❌  Vui lòng paste giá trị ln_session vào ô trên.")
+                    msg_lbl.configure(fg=FG_ERROR)
+                    return
+                global SESSION_COOKIES
+                SESSION_COOKIES['ln_session'] = val
+                # Lưu file
+                try:
+                    existing = {}
+                    if isfile(COOKIES_FILE):
+                        with open(COOKIES_FILE, 'r', encoding='utf-8') as f:
+                            existing = json.load(f)
+                    existing['ln_session'] = val
+                    with open(COOKIES_FILE, 'w', encoding='utf-8') as f:
+                        json.dump(existing, f, indent=2, ensure_ascii=False)
+                except Exception:
+                    pass
+                try:
+                    if hasattr(_tls, 'scraper'):
+                        _tls.scraper.cookies.update(SESSION_COOKIES)
+                except Exception:
+                    pass
+                msg_var.set("✅  Đã lưu cookie ln_session thành công!")
+                msg_lbl.configure(fg=FG_SUCCESS)
+                _on_success("nhập tay")
+
+            self._make_button(btn_bar, "💾  Lưu cookie", _save_manual,
+                              "#1a5c1a", "#237a23",
+                              font=("Segoe UI", 9, "bold"), padx=14, pady=7).pack(side=tk.LEFT)
+        def _close_dlg():
+            try:
+                if hasattr(dlg, '_chrome_proc') and dlg._chrome_proc:
+                    dlg._chrome_proc.terminate()
+            except Exception:
+                pass
+            try:
+                if hasattr(dlg, '_chrome_tmp_dir') and dlg._chrome_tmp_dir:
+                    import shutil
+                    shutil.rmtree(dlg._chrome_tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
+            dlg.destroy()
+
+        self._make_button(btn_bar, "Hủy", _close_dlg,
+                          "#252540", "#353560",
+                          font=("Segoe UI", 9), padx=12, pady=7).pack(side=tk.LEFT, padx=(8, 0))
+        dlg.bind("<Return>", lambda e: _save_manual())
+
+        # Hiện pane auto mặc định
+        pane_auto.pack(fill=tk.BOTH, expand=True)
+        _build_auto_buttons()
+        dlg.bind("<Escape>", lambda e: _close_dlg())
+        dlg.protocol("WM_DELETE_WINDOW", _close_dlg)
+
+    def _do_logout(self):
+        """Xóa cookie phiên đăng nhập."""
+        global SESSION_COOKIES
+        SESSION_COOKIES = {}
+        # Xóa file cookies.json
+        try:
+            import os
+            if isfile(COOKIES_FILE):
+                os.remove(COOKIES_FILE)
+        except Exception:
+            pass
+        # Reset scraper threads
+        try:
+            if hasattr(_tls, 'scraper'):
+                del _tls.scraper
+        except Exception:
+            pass
+        # Cập nhật badge
+        if hasattr(self, '_login_status_text'):
+            self._login_status_text.set("○  Chưa đăng nhập")
+            self._login_status_lbl.configure(fg=FG_SECONDARY)
+        self._append_log("🚪  Đã đăng xuất khỏi Hako.", "info")
 
     # ── Start download (called from button) ────────────────────────────────
     def _start_download(self):
@@ -1223,9 +1715,13 @@ class Volume:
     def get_volume_info(self):
         if not self.soup:
             return
-        vol_name_tag = self.soup.find('span', 'volume-name').find('a')
-        if vol_name_tag:
-            self.name = Utils.format_text(vol_name_tag.text)
+        vol_name_span = self.soup.find('span', 'volume-name')
+        if vol_name_span:
+            vol_name_a = vol_name_span.find('a')
+            if vol_name_a:
+                self.name = Utils.format_text(vol_name_a.text)
+            else:
+                self.name = Utils.format_text(vol_name_span.text)
         cover_div = self.soup.find('div', 'series-cover')
         if cover_div:
             style_attr = cover_div.find('div', 'img-in-ratio').get('style', '')
@@ -1338,13 +1834,21 @@ class LNInfo:
         volume_sections = soup.find_all('section', 'volume-list')
         self.num_vol = len(volume_sections)
         for vs in volume_sections:
-            link_cover = vs.find('div', 'volume-cover').find('a')
-            if link_cover:
-                vol_url = Utils.re_url(self.url, link_cover.get('href'))
-                vol_req = check_available_request(vol_url)
-                vol_soup = BeautifulSoup(vol_req.text, bs4_html_parser)
-                volume_obj = Volume(vol_url, vol_soup)
-                self.volume_list.append(volume_obj)
+            vol_url = ''
+            vol_cover_div = vs.find('div', 'volume-cover')
+            if vol_cover_div:
+                link_cover = vol_cover_div.find('a')
+                if link_cover:
+                    vol_url = Utils.re_url(self.url, link_cover.get('href'))
+            
+            # Nếu không tìm thấy link cover (ví dụ truyện bị ẩn/fake soup) thì tự fake 1 url để tránh lỗi
+            if not vol_url:
+                vol_url = self.url
+                
+            # Không cần tải lại volume nếu dùng fake_soup từ manage, truyền thẳng vs (volume_section) để parse
+            vol_soup = BeautifulSoup(str(vs), bs4_html_parser)
+            volume_obj = Volume(vol_url, vol_soup)
+            self.volume_list.append(volume_obj)
 
 
 # CSS cho phong cách đọc Light Novel
@@ -1631,6 +2135,18 @@ class EpubEngine:
                     chap_name = h4.text.strip()
             
             chapter_content_div = soup.find('div', id='chapter-content')
+            
+            # --- Hỗ trợ tải truyện bị ẩn qua link /edit ---
+            if not chapter_content_div and '/edit' in chap_url:
+                textarea = soup.find('textarea', id='LN_Chapter_Content')
+                if textarea:
+                    import html
+                    raw_html = textarea.get_text()
+                    # HTML parser có sẵn của BeautifulSoup sẽ tự động parse nội dung này
+                    fake_html = f'<div id="chapter-content">{raw_html}</div>'
+                    chapter_content_div = BeautifulSoup(fake_html, bs4_html_parser).find('div')
+                    print(f"        ✓ Lấy thành công nội dung chương bị ẩn qua /edit: {chap_name}")
+            # ----------------------------------------------
 
             if chapter_content_div:
                 # --- BẮT ĐẦU: Giải mã nội dung bị mã hóa (JS Anti-copy) ---
@@ -1933,9 +2449,168 @@ class Engine:
     def check_valid_url(self, url):
         if url.isdigit():
             return True
+        # Hỗ trợ link manage cho truyện bị ẩn: /action/series/{id}/manage
+        if 'ln.hako.vn/action/series/' in url and '/manage' in url:
+            return True
         if not any(s in url for s in ['ln.hako.vn/truyen/', 'docln.net/truyen/', 'docln.sbs/truyen/', 'docln.net/ai-dich/', 'docln.sbs/ai-dich/']):
             return False
         return True
+
+    def extract_series_id(self, url):
+        """Trích xuất series ID từ URL manage. VD: /action/series/26338/manage → 26338"""
+        m = re.search(r'/action/series/(\d+)/manage', url)
+        if m:
+            return m.group(1)
+        return None
+
+    def resolve_manage_url(self, manage_url):
+        """
+        Với link /action/series/{id}/manage:
+        1. Thử tải /truyen/{id} với cookie — nếu có volume-list thì dùng luôn
+        2. Nếu không, parse trang manage để lấy danh sách volume/chương
+        """
+        series_id = self.extract_series_id(manage_url)
+        if not series_id:
+            return None, None
+
+        if not manage_url.startswith('http'):
+            manage_url = 'https://docln.sbs' + manage_url
+            
+        # Tự động thay thế tên miền bị nhà mạng VN chặn (ln.hako.vn) sang tên miền phụ (docln.sbs)
+        manage_url = manage_url.replace('ln.hako.vn', 'docln.sbs').replace('docln.net', 'docln.sbs')
+        
+        # Lấy domain gốc (ln.hako.vn hoặc docln.sbs)
+        from urllib.parse import urlparse
+        parsed = urlparse(manage_url)
+        base_domain = f"{parsed.scheme}://{parsed.netloc}"
+        
+        # Nếu nhập link /action/series/... không có /manage, tự động thêm
+        if '/action/series/' in manage_url and not manage_url.endswith('/manage') and 'edit' not in manage_url:
+            manage_url = f'{base_domain}/action/series/{series_id}/manage'
+
+        if not SESSION_COOKIES:
+            print("[Manage] ⚠ Truyện bị ẩn cần đăng nhập. Hãy đăng nhập trong app trước.")
+            return None, None
+
+        truyen_url = f'{base_domain}/truyen/{series_id}'
+
+        print(f"[Manage] Thử tải trang truyện (với cookie): {truyen_url}")
+        try:
+            r1 = check_available_request(truyen_url, max_exception_retries=2)
+            if r1.status_code == 200:
+                s1 = BeautifulSoup(r1.text, bs4_html_parser)
+                if s1.find('section', 'volume-list'):
+                    print("[Manage] ✅ Cookie hợp lệ — tải được trang truyện bình thường.")
+                    return truyen_url, s1
+        except Exception as e:
+            print(f"[Manage] Lỗi khi tải trang truyện: {e}")
+
+        # Bước 2: Tải trang manage
+        print(f"[Manage] Đang truy cập trang quản lý: {manage_url}")
+        try:
+            r = check_available_request(manage_url, max_exception_retries=3)
+            if r.status_code != 200:
+                print(f"[Manage] Lỗi HTTP {r.status_code}. Cookie có thể hết hạn.")
+                return None, None
+
+            soup = BeautifulSoup(r.text, bs4_html_parser)
+
+            # Dump HTML ra file debug để xem cấu trúc
+            try:
+                with open('manage_debug.html', 'w', encoding='utf-8') as _f:
+                    _f.write(r.text)
+            except Exception:
+                pass
+
+            page_title = soup.find('title')
+            page_title_text = page_title.get_text(strip=True) if page_title else '(không có title)'
+            print(f"[Manage] Page title: {page_title_text}")
+            if 'login' in r.url.lower() or 'đăng nhập' in page_title_text.lower():
+                print("[Manage] ❌ Bị redirect về trang login! Cookie đã hết hạn hoặc không hợp lệ.")
+                return None, None
+
+            # Lấy tên truyện
+            series_name = ''
+            for sel in ['h1', 'h2', 'h2.text-3xl', '.series-name', 'title']:
+                tag = soup.find(sel)
+                if tag:
+                    series_name = tag.get_text(strip=True)
+                    if series_name:
+                        break
+            print(f"[Manage] Tên truyện (dự đoán): {series_name or '(chưa xác định)'}")
+
+            # Phân tích danh sách volume & chương từ HTML manage
+            fake_html_parts = [
+                f'<html><body>',
+                f'<span class="series-name">{series_name or "Unknown"}</span>',
+                f'<div class="series-cover"><div class="img-in-ratio" style=""></div></div>'
+            ]
+
+            volumes_found = 0
+            chapters_found = 0
+
+            # Tìm tất cả các khối volume (thường có id dạng book-xxxx)
+            for vol_div in soup.find_all('div', id=re.compile(r'^book-\d+')):
+                # Tên volume
+                vol_title_tag = vol_div.find(['h3', 'h4'])
+                vol_name = vol_title_tag.get_text(strip=True) if vol_title_tag else f"Volume {volumes_found+1}"
+                
+                # Tìm list chương
+                ul_tag = vol_div.find('ul', id=re.compile(r'^chapter-list-'))
+                if not ul_tag:
+                    continue
+
+                volumes_found += 1
+                fake_html_parts.append('<section class="volume-list">')
+                fake_html_parts.append(f'<span class="volume-name"><a>{vol_name}</a></span>')
+                fake_html_parts.append('<ul class="list-chapters">')
+
+                for li in ul_tag.find_all('li', id=re.compile(r'^chapter-\d+')):
+                    # Tên chương
+                    chap_name_tag = li.find('div', class_=re.compile(r'font-medium text-gray-800'))
+                    chap_name = chap_name_tag.get_text(strip=True) if chap_name_tag else f"Chapter {chapters_found+1}"
+                    
+                    # Ưu tiên lấy link Sửa chương (/edit) vì truyện bị ẩn thì link public (Xem chương) sẽ bị 404
+                    chap_link_tag = None
+                    for a in li.find_all('a', href=True):
+                        if '/edit' in a['href']:
+                            chap_link_tag = a
+                            break
+                    
+                    # Fallback về link public (Xem chương) nếu không tìm thấy link sửa
+                    if not chap_link_tag:
+                        chap_link_tag = li.find('a', title="Xem chương")
+                        if not chap_link_tag:
+                            for a in li.find_all('a', href=True):
+                                if '/truyen/' in a['href'] or '/doc-truyen/' in a['href']:
+                                    chap_link_tag = a
+                                    break
+                                
+                    if chap_link_tag:
+                        href = chap_link_tag['href']
+                        full_url = href if href.startswith('http') else f'{base_domain}{href}'
+                        fake_html_parts.append(f'<li><a href="{full_url}">{chap_name}</a></li>')
+                        chapters_found += 1
+
+                fake_html_parts.append('</ul></section>')
+
+            if chapters_found == 0:
+                print("[Manage] ⚠ Không tìm thấy chương nào trong cấu trúc manage.")
+                return None, None
+
+            fake_html_parts.append('</body></html>')
+            fake_html = "\n".join(fake_html_parts)
+            
+            fake_soup = BeautifulSoup(fake_html, bs4_html_parser)
+            print(f"[Manage] ✅ Phân tích thành công {volumes_found} volume, {chapters_found} chương.")
+            return manage_url, fake_soup
+
+        except Exception as e:
+            print(f"[Manage] Lỗi xử lý trang quản lý: {e}")
+            import traceback
+            traceback.print_exc()
+            return None, None
+
 
     def run_with_app(self, lines, app: 'HakoApp'):
         """
@@ -1977,7 +2652,12 @@ class Engine:
 
     def process_line(self, line, app=None):
         urls_to_try = []
-        if line.isdigit():
+        is_manage_url = 'action/series/' in line and '/manage' in line
+
+        if is_manage_url:
+            # Link manage của truyện bị ẩn — xử lý đặc biệt
+            urls_to_try = [line]
+        elif line.isdigit():
             primary = f"{DEFAULT_URLS}/truyen/{line}"
             fallbacks = [
                 f"https://docln.net/truyen/{line}",
@@ -1996,29 +2676,41 @@ class Engine:
         chosen_soup = None
         error_msg   = ""
 
-        for url in urls_to_try:
-            if not self.check_valid_url(url):
-                continue
-            try:
-                print(f"Bắt đầu kiểm tra: {url}")
+        # ── Xử lý đặc biệt: link manage (truyện bị ẩn) ───────────────────────
+        if is_manage_url:
+            if app:
+                app.update_novel_status(line, "🔐", None, "Đang truy cập trang manage…",
+                                        FG_WARNING, FG_WARNING, progress=5)
+            chosen_url, chosen_soup = self.resolve_manage_url(line)
+            if chosen_url is None:
                 if app:
-                    app.update_novel_status(line, "🔄", None, "Đang kết nối…",
-                                            ACCENT3, FG_INFO, progress=5)
-                r = check_available_request(url, max_exception_retries=2)
-                if r.status_code == 404:
-                    print(f"Không tìm thấy trang (404): {url}")
+                    app.update_novel_status(line, "❌", None, "Không truy cập được trang manage",
+                                            FG_ERROR, FG_ERROR, progress=100)
+                return (False, line, "Không truy cập được trang manage. Kiểm tra cookies.json.")
+        else:
+            for url in urls_to_try:
+                if not self.check_valid_url(url):
                     continue
-                soup = BeautifulSoup(r.text, bs4_html_parser)
-                if not soup.find('section', 'volume-list'):
-                    print(f"Không tìm thấy danh sách tập: {url}")
-                    continue
-                # Domain hợp lệ
-                chosen_url  = url
-                chosen_soup = soup
-                break
-            except Exception as e:
-                error_msg = str(e)
-                print(f"Lỗi kết nối ban đầu {url}: {e} — thử domain khác…")
+                try:
+                    print(f"Bắt đầu kiểm tra: {url}")
+                    if app:
+                        app.update_novel_status(line, "🔄", None, "Đang kết nối…",
+                                                ACCENT3, FG_INFO, progress=5)
+                    r = check_available_request(url, max_exception_retries=2)
+                    if r.status_code == 404:
+                        print(f"Không tìm thấy trang (404): {url}")
+                        continue
+                    soup = BeautifulSoup(r.text, bs4_html_parser)
+                    if not soup.find('section', 'volume-list'):
+                        print(f"Không tìm thấy danh sách tập: {url}")
+                        continue
+                    # Domain hợp lệ
+                    chosen_url  = url
+                    chosen_soup = soup
+                    break
+                except Exception as e:
+                    error_msg = str(e)
+                    print(f"Lỗi kết nối ban đầu {url}: {e} — thử domain khác…")
 
         if chosen_url is None:
             if app:
