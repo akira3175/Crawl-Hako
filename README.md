@@ -7,6 +7,8 @@ Công cụ tải và chuyển đổi light novel từ **ln.hako.vn**, **docln.ne
 ## Tính năng nổi bật
 
 - **Giao diện trực quan & Log thời gian thực**: Thiết kế màu tối (Dark Cyberpunk) kết hợp theo dõi chi tiết toàn bộ tiến trình tải độc lập ở từng truyện.
+- **Hỗ trợ tải truyện ẩn (Private Projects)**: Tự động trích xuất nội dung chương từ giao diện quản lý (`/edit`), cho phép biên dịch các dự án truyện đang bị ẩn hoặc được thiết lập riêng tư (yêu cầu đăng nhập).
+- **Đăng nhập & Lấy Cookie tự động (CDP)**: Khởi chạy trình duyệt (Chrome/Edge/Brave) độc lập qua giao thức Remote Debugging để lấy `ln_session` an toàn, không bị kẹt file hay bắt buộc đóng trình duyệt cá nhân đang dùng.
 - **Tải bộ đệm song song**: Tối đa 4 truyện đồng thời, với 8 luồng tải dữ liệu song song cho mỗi truyện giúp gia tăng tốc độ hiệu quả.
 - **Xoay tua IP tự động (Proxy Rotation)**: Hỗ trợ nạp và xoay proxy liên tục khi bị máy chủ khóa mạng, xóa tan rào cản IP từ hệ thống Cloudflare.
 - **Mặt nạ thiết bị đa dạng (User-Agent Masking)**: Giả lập đến hàng chục User Profile mô phỏng thiết bị thực tế trên Desktop (Windows, macOS) lẫn Mobile (iOS, Android).
@@ -129,6 +131,8 @@ Danh mục hệ thống cấu trúc hiển thị như sau:
 | `ebooklib` | Công cụ định dạng HTML sang file lưu trữ phân chia chương mã nguồn EPUB. |
 | `Pillow` | Xử lý hình ảnh, thu phóng và chuyển đổi Bitmap sang các tệp tin JPG/PNG nén. |
 | `tqdm` | Hiện thanh báo cáo quá trình chạy tải xuống tại các phiên bản dòng lệnh Terminal cũ. |
+| `websocket-client` | Kết nối qua Chrome DevTools Protocol (CDP) để trích xuất cookie trình duyệt tự động. |
+| `pywin32` / `cryptography` | Khôi phục và giải mã dữ liệu cookie mã hóa nội bộ của Chromium/Windows. |
 
 ---
 
