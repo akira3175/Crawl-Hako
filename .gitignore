@@ -1,4 +1,11 @@
 /raw
 /dist
 /build
+cookies.json
 .cookies.json
+settings.json
+_test_cookie.py
+*.spec
+*.log
+__pycache__/
+error_*.html
